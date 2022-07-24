@@ -1,7 +1,7 @@
 ---
 title: "Paraglide Wisconsin"
 author: "Plan Your Next Adventure"
-date: "`r paste('Forecast Retrieved on', format(Sys.time(), '%a %b %d at %H:%M'))`"
+date: "`r paste('Forecast Pulled on', format(Sys.time(), '%a %b %d at %H:%M'))`"
 output: html_document
 ---
 
@@ -261,7 +261,7 @@ fetched %>%
     group = ~ status$status
   ) %>% 
   leaflegend::addLegendAwesomeIcon(iconSet = iconSet,
-                       orientation = 'vertical',
+                       orientation = 'horizontal',
                        title = htmltools::tags$div(
                          style = 'font-size: 14px;',
                          'Flyability'),
