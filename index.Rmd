@@ -258,7 +258,7 @@ fetched %>%
     popup = ~ status$caption,
     label = ~ status$name,
     icon = ~ iconSet[status$status],
-    group = ~ status$status
+    group = ~ "Flight Parks"
   ) %>% 
   leaflegend::addLegendAwesomeIcon(iconSet = iconSet,
                        orientation = 'horizontal',
@@ -267,7 +267,7 @@ fetched %>%
                          'Flyability'),
                        labelStyle = 'font-size: 12px;',
                        position = 'bottomright',
-                       group = ~ status$status) %>%
+                       group = ~ "Flight Parks") %>%
   hideGroup("Population Density") %>%
   setView(-89.4008, 43.0722, zoom = 6)
 ```
