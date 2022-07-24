@@ -1,0 +1,277 @@
+---
+title: "Paraglide Wisconsin"
+author: "Plan Your Next Adventure"
+date: "`r paste('Forecast Retrieved on', format(Sys.time(), '%a %b %d at %H:%M'))`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 3-Day Flyability
+
+```{r data, include=FALSE}
+library(jsonlite)
+library(stringr)
+library(tidyverse)
+library(tidycensus)
+library(glue)
+library(data.table)
+library(anytime)
+library(weathermetrics)
+library(leaflegend)
+require(maptools)
+require(tigris)
+require(sf)
+require(leaflet)
+
+box::use(tools/keys) # load api keys
+
+# define sites takeoff lat/long and add description
+takeoff <- tibble::tribble(
+  ~id, ~latitude, ~longitude, ~min_wind, ~max_wind, ~min_deg1, ~max_deg1, ~min_deg2, ~max_deg2, ~caption, 
+  "hager", 44.617, -92.5566, 3, 10, 160, 240, 0, 0, "<b>Hagar City, WI</b> </br> Trenton Bluff Prairie </br> Ridge Soaring (P2) </br> </br> <b>3-Day Weather</b> </br>",
+  "sauk", 43.256443, -89.789153, 3, 10, 60, 120, 240, 300, "<b>Sauk City, WI</b>  </br> Fen Rd. </br> Towing (P2) </br> </br> <b>3-Day Weather</b> </br>",
+  "elver", 43.036036, -89.502803, 3, 10, 320, 360, 0, 55, "<b>Madison, WI</b>  </br> Elver Park </br> Training Hill (P1) </br> </br> <b>3-Day Weather</b> </br>",
+  "platte", 42.763713, -90.406666, 3, 10, 220, 255, 0, 0, "<b>Platteville, WI</b>  </br> Platte Mound M </br> Ridge Soaring (P2) </br> </br> <b>3-Day Weather</b> </br>",
+  "mound", 43.764623, -91.431310, 3, 10, 180, 240, 0, 0, "<b>Houston, MN</b>  </br> Mound Prairie </br> Ridge Soaring (P2) </br> </br> <b>3-Day Weather</b> </br>",
+  "bender", 42.864965, -87.839789, 3, 10, 35, 75, 0, 0, "<b>Oak Creek, WI</b>  </br> Bender Park </br> Ridge Soaring (P2) </br> </br> <b>3-Day Weather</b> </br>"
+  )
+
+takeoff$latitude <- as.numeric(takeoff$latitude)
+takeoff$longitude <- as.numeric(takeoff$longitude)
+
+# now connect data to openweathermap api and loop through sites lat/lon
+geoForecast <- function(lat, lon) { 
+  my_dt = as.numeric(as.POSIXct(strftime(Sys.Date()-0)))
+  API_key = ow_api
+  url <- paste0("http://api.openweathermap.org/data/2.5/onecall?lat=",lat,
+                "&lon=", lon,
+                "&dt=", my_dt,
+                "&exclude=current,minutely,daily,alerts",
+                "&appid=", API_key)
+  ow <- fromJSON(url)
+}
+
+geoApply <- mapply(geoForecast, takeoff$latitude, takeoff$longitude)
+
+# loop through sites and get weather
+
+# create empty df for merging
+merged_data <- data.frame()
+
+for(i in 1:length(takeoff$latitude)){
+  name <- takeoff$id[i]
+  data <- geoApply[[i]]$daily
+  data_time <- data %>%
+    mutate(dt = anytime(dt)) %>%
+    select(dt, temp)
+  data <- data %>%
+    mutate(dt = anytime(dt)) %>%
+    select(wind_speed, wind_gust, wind_deg, weather, clouds)
+  data <- apply(data, 2, function(y) sapply(y, function(x) paste(unlist(x), collapse=" - ")))
+  data <- data.table(data)
+  data <- cbind(data_time, data)
+  data <- data %>%
+    mutate(rain = str_detect(weather,"rain"),
+           light_rain = str_detect(weather,"light rain"),
+           clouds = str_detect(weather,"clouds"),
+           overcast = str_detect(weather,"overcast"),
+           clear = str_detect(weather,"clear"),
+           id = name) %>%
+    select(-weather) %>%
+    left_join(takeoff, by = "id")
+  merged_data <- merged_data %>% bind_rows(data)
+}
+
+# define logic for flyability
+fly <- merged_data %>%
+  mutate(wind_speed_ok1 = ifelse(as.numeric(wind_speed) >= min_wind, TRUE, FALSE),
+         wind_speed_ok2 = ifelse(as.numeric(wind_gust) - 3 <= max_wind, TRUE, FALSE), # gusts 3mph over max wind speed are allowed
+         wind_speed_ok = ifelse(wind_speed_ok1 == TRUE & wind_speed_ok2 == TRUE, TRUE, FALSE),
+         wind_direction1_ok = ifelse(as.numeric(wind_deg) >= min_deg1 & as.numeric(wind_deg) <= max_deg1, TRUE, FALSE),
+         wind_direction2_ok = ifelse(as.numeric(wind_deg) >= min_deg2 & as.numeric(wind_deg) <= max_deg2, TRUE, FALSE),
+         wind_direction_ok = ifelse(wind_direction1_ok == TRUE | wind_direction2_ok == TRUE, TRUE, FALSE),
+         rain_ok = ifelse(rain == FALSE | light_rain == TRUE, TRUE, FALSE), # light rain is allowed
+         flyable = ifelse(wind_speed_ok == TRUE & wind_direction_ok == TRUE & rain_ok == TRUE, TRUE, FALSE))
+
+# define logic if site is flyable today, tomorrow, or the day after
+three_days <- fly %>%
+  mutate(dt = format(dt, "%Y-%m-%d"),
+         day = ifelse(dt == Sys.Date(), "Today",
+                      ifelse(dt == Sys.Date() + 1, "Tomorrow", 
+                      ifelse(dt == Sys.Date() + 2, "After Tomorrow", NA)))) %>%
+  drop_na(day)
+
+three_days_clean <- three_days[-2]
+
+three_days <- cbind(three_days_clean, three_days[2][[1]][[1]]) %>%
+  rename(temp = `three_days[2][[1]][[1]]`) %>%
+  mutate(temp = round(kelvin.to.fahrenheit(temp),0)) %>%
+  mutate(temp_diff = round(three_days$temp$max - three_days$temp$min, 0))
+
+rose_breaks <- c(0, 360/32, (1/32 + (1:15 / 16)) * 360, 360)
+
+rose_labs <- c(
+  "North", "North-Northeast", "Northeast", "East-Northeast",
+  "East", "East-Southeast", "Southeast", "South-Southeast",
+  "South", "South-Southwest", "Southwest", "West-Southwest",
+  "West", "West-Northwest", "Northwest", "North-Northwest",
+  "North"
+)
+
+three_days <- three_days %>%
+  mutate(
+    rose = cut(
+      as.numeric(wind_deg),
+      breaks = rose_breaks,
+      labels = rose_labs,
+      right = FALSE,
+      include.lowest = TRUE
+    )
+  ) %>%
+  select(id, caption, latitude, longitude, dt, day, flyable, 
+         wind_speed, wind_gust, wind_speed_ok, wind_direction_ok, rose, 
+         rain, light_rain, clouds, overcast, clear, temp, temp_diff) %>%
+  mutate(wind_speed = round(as.numeric(wind_speed), 0)) %>%
+  mutate(wind_gust = round(as.numeric(wind_gust), 0))
+
+status <- three_days %>%
+  group_by(id) %>%
+  mutate(flyable_today = ifelse(day == "Today" & flyable == TRUE, TRUE, FALSE),
+         flyable_tomorrow = ifelse(day == "Tomorrow" & flyable == TRUE, TRUE, FALSE), 
+         flyable_after_tomorrow = ifelse(day == "After Tomorrow" & flyable == TRUE, TRUE, FALSE)) %>%
+  summarize(flyable_today = sum(flyable_today, na.rm = TRUE),
+            flyable_tomorrow = sum(flyable_tomorrow, na.rm = TRUE),
+            flyable_after_tomorrow = sum(flyable_after_tomorrow, na.rm = TRUE)) %>%
+  mutate(status = ifelse(flyable_after_tomorrow == 1, "Flyable Soon",
+                         ifelse(flyable_tomorrow == 1, "Flyable Soon","Not Flyable")),
+         status = ifelse(flyable_today == 1, "Flyable", status))
+
+three_days_long <- reshape(three_days, idvar = "id", timevar = "day", direction = "wide")
+
+# add flyable emojis
+caption <- three_days_long %>%
+  mutate(today = ifelse(flyable.Today == TRUE,
+                        paste("<p style='color:blue;'> &#129666;", format(Sys.Date(), "%m/%d"), glue("| {temp.Today}f ({temp_diff.Today}) | {rose.Today} at {wind_speed.Today}mph (g:{wind_gust.Today}) </br> </p>")),
+                        ifelse(flyable.Today == FALSE & rain.Today == TRUE,
+                               paste("<p style='color:red;'> &#128167;", format(Sys.Date(), "%m/%d"), glue("| {temp.Today}f ({temp_diff.Today}) | {rose.Today} at {wind_speed.Today}mph (g:{wind_gust.Today}) </br> </p>")),
+                               ifelse(flyable.Today == FALSE,
+                                      paste("<p style='color:red;'> &#128168;", format(Sys.Date(), "%m/%d"), glue("| {temp.Today}f ({temp_diff.Today}) | {rose.Today} at {wind_speed.Today}mph (g:{wind_gust.Today}) </br> </p>")),
+                                      paste("<p style='color:red;'>", format(Sys.Date(), "%m/%d"), glue("| {temp.Today}f ({temp_diff.Today}) | {rose.Today} at {wind_speed.Today}mph (g:{wind_gust.Today}) </br> </p>"))))),
+         tomorrow = ifelse(flyable.Tomorrow == TRUE,
+                           paste("<p style='color:blue;'> &#129666;", format(Sys.Date() + 1, "%m/%d"), glue("| {temp.Tomorrow}f ({temp_diff.Tomorrow}) | {rose.Tomorrow} at {wind_speed.Tomorrow}mph (g:{wind_gust.Tomorrow}) </br> </p>")),
+                           ifelse(flyable.Tomorrow == FALSE & rain.Tomorrow == TRUE,
+                                  paste("<p style='color:red;'> &#128167;", format(Sys.Date() + 1, "%m/%d"), glue("| {temp.Tomorrow}f ({temp_diff.Tomorrow}) | {rose.Tomorrow} at {wind_speed.Tomorrow}mph (g:{wind_gust.Tomorrow}) </br> </p>")),
+                                  ifelse(flyable.Tomorrow == FALSE,
+                                         paste("<p style='color:red;'> &#128168;", format(Sys.Date() + 1, "%m/%d"), glue("| {temp.Tomorrow}f ({temp_diff.Tomorrow}) | {rose.Tomorrow} at {wind_speed.Tomorrow}mph (g:{wind_gust.Tomorrow}) </br> </p>")),
+                                         paste("<p style='color:red;'>", format(Sys.Date() + 1, "%m/%d"), glue("| {temp.Tomorrow}f ({temp_diff.Tomorrow}) | {rose.Tomorrow} at {wind_speed.Tomorrow}mph (g:{wind_gust.Tomorrow}) </br> </p>"))))),
+         day_after = ifelse(`flyable.After Tomorrow` == TRUE,
+                            paste("<p style='color:blue;'> &#129666;", format(Sys.Date() + 2, "%m/%d"), glue("| {`temp.After Tomorrow`}f ({`temp_diff.After Tomorrow`}) | {`rose.After Tomorrow`} at {`wind_speed.After Tomorrow`}mph (g:{`wind_gust.After Tomorrow`}) </br> </p>")),
+                            ifelse(`flyable.After Tomorrow` == FALSE & `rain.After Tomorrow` == TRUE,
+                                   paste("<p style='color:red;'> &#128167;", format(Sys.Date() + 2, "%m/%d"), glue("| {`temp.After Tomorrow`}f ({`temp_diff.After Tomorrow`}) | {`rose.After Tomorrow`} at {`wind_speed.After Tomorrow`}mph (g:{`wind_gust.After Tomorrow`}) </br> </p>")),
+                                   ifelse(`flyable.After Tomorrow` == FALSE,
+                                          paste("<p style='color:red;'> &#128168;", format(Sys.Date() + 2, "%m/%d"), glue("| {`temp.After Tomorrow`}f ({`temp_diff.After Tomorrow`}) | {`rose.After Tomorrow`} at {`wind_speed.After Tomorrow`}mph (g:{`wind_gust.After Tomorrow`}) </br> </p>")),
+                                          paste("<p style='color:red;'>", format(Sys.Date() + 2, "%m/%d"), glue("| {`temp.After Tomorrow`}f ({`temp_diff.After Tomorrow`}) | {`rose.After Tomorrow`} at {`wind_speed.After Tomorrow`}mph (g:{`wind_gust.After Tomorrow`}) </br> </p>"))))),
+         weather_caption = paste(today, tomorrow, day_after)) %>%
+  select(id,weather_caption)
+
+takeoff <- takeoff %>%
+  left_join(caption) %>%
+  mutate(caption = paste(caption,weather_caption))
+
+# integrate into first table
+status <- status %>%
+  left_join(takeoff) %>%
+  mutate(name = case_when(
+    id == "hager" ~ "Hagar City, WI",
+    id == "sauk" ~ "Sauk City, WI",
+    id == "elver" ~ "Madison, WI"
+  ))
+
+tracts <- tracts(state = 'WI', cb=TRUE)
+
+fetched <- tidycensus::get_acs(geography = "county", 
+                   variables = "B01003_001", 
+                   state = "WI",
+                   geometry = TRUE,
+                   key = census_api)
+
+pal <- colorQuantile(palette = "viridis", domain = fetched$estimate, n = 5)
+
+flyability <- c("Flyable (Today)","Flyable (1-2 Days)","Not Flyable")
+
+flyability <- factor(flyability, levels = c("Flyable (Today)","Flyable (1-2 Days)","Not Flyable"))
+
+fly_pal <- c("#0000FF","#6A0DAD","#FF0000")
+
+pal_three <- colorFactor(fly_pal, flyability)
+
+iconSet <- awesomeIconList(
+  `Flyable` = makeAwesomeIcon(
+    icon = 'smile-o',
+    library = 'fa',
+    iconColor = '#FFFFFF',
+    markerColor = 'blue'
+  ),
+  `Flyable Soon` = makeAwesomeIcon(
+    icon = 'meh-o',
+    library = 'fa',
+    iconColor = '#FFFFFF',
+    markerColor = 'purple'
+  ),
+  `Not Flyable` = makeAwesomeIcon(
+    icon = 'frown-o',
+    library = 'fa',
+    iconColor = '#FFFFFF',
+    markerColor = 'orange'
+  )
+)
+```
+
+```{r flyable_map, eval=FALSE, warning=FALSE, include=FALSE}
+fetched %>%
+  sf::st_transform(crs = "+init=epsg:4326") %>%
+  leaflet::leaflet(width = "100%") %>%
+  leaflet::addProviderTiles(provider = "CartoDB.Positron") %>%
+  leaflet::addProviderTiles(leaflet::providers$OpenTopoMap, group='Topo') %>%
+  leaflet::addPolygons(popup = ~ stringr::str_extract(NAME, "^([^,]*)"),
+                       stroke = FALSE,
+                       smoothFactor = 0,
+                       fillOpacity = 0.5,
+                       color = ~ pal(estimate),
+                       group = "Population Density") %>%
+  leaflet::addLayersControl(
+    overlayGroups = c("Flight Parks", "Population Density"),
+    position = "topright",
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  leaflet::addLegend("bottomright", 
+                     pal = pal, 
+                     values = ~ estimate,
+                     title = "Population percentiles",
+                     opacity = 1,
+                     group = "Population Density") %>%
+  leaflet::addAwesomeMarkers(
+    ~status$longitude, ~status$latitude,
+    popup = ~ status$caption,
+    label = ~ status$name,
+    icon = ~ iconSet[status$status],
+    group = ~ status$status
+  ) %>% 
+  leaflegend::addLegendAwesomeIcon(iconSet = iconSet,
+                       orientation = 'vertical',
+                       title = htmltools::tags$div(
+                         style = 'font-size: 14px;',
+                         'Flyability'),
+                       labelStyle = 'font-size: 12px;',
+                       position = 'bottomright',
+                       group = ~ status$status) %>%
+  hideGroup("Population Density")
+```
+
+```{r leaflet-out, fig.height=5, out.width="100%", ref.label="flyable_map", echo=FALSE, warning=FALSE}
+```
+
+Created by Dylan Pieper. Powered by the [OpenWeatherMap](https://openweathermap.org/) API. 
