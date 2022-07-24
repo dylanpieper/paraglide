@@ -268,7 +268,8 @@ fetched %>%
                        labelStyle = 'font-size: 12px;',
                        position = 'bottomright',
                        group = ~ status$status) %>%
-  hideGroup("Population Density")
+  hideGroup("Population Density") %>%
+  setView(-89.4008, 43.0722, zoom = 6)
 ```
 
 ```{r leaflet-out, fig.height=5, out.width="100%", ref.label="flyable_map", echo=FALSE, warning=FALSE}
